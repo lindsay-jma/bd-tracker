@@ -29,7 +29,7 @@ PTYPES = "o,p,r,k"  # solicitation, presolicitation, sources sought, combined sy
 SHEET_COLUMNS = [
     "Notice ID", "Title", "Agency", "Type", "Set-Aside", "NAICS", "Posted",
     "Deadline", "Days Left", "Score", "Eligibility", "Link", "CO Contact",
-    "Status", "Bid Decision", "No-Bid Reason", "Notes",
+    "Status", "Bid Decision", "No-Bid Reason", "Notes", "Synopsis",
 ]
 
 TERMINAL_STATUSES = {"No-Bid", "Lost", "Won", "Expired"}
@@ -150,20 +150,35 @@ def fetch_opportunities(api_key, posted_from, posted_to):
     return results
 
 
+def _strip_html(text):
+    import html
+    import re
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
 def fetch_description(url, api_key):
+    """Returns (text, hit_rate_limit). text is '' on any failure; hit_rate_limit
+    is True only on a 429, so the caller knows to stop trying more fetches."""
     try:
         resp = requests.get(url, params={"api_key": api_key}, timeout=20)
-        if resp.status_code == 200:
-            text = resp.text
-            try:
-                parsed = resp.json()
-                text = parsed.get("description", text)
-            except ValueError:
-                pass
-            return text.strip()[:400]
     except requests.RequestException:
+        return "", False
+
+    if resp.status_code == 429:
+        return "", True
+    if resp.status_code != 200:
+        return "", False
+
+    text = resp.text
+    try:
+        parsed = resp.json()
+        text = parsed.get("description", text)
+    except ValueError:
         pass
-    return ""
+    return _strip_html(text)[:600], False
 
 
 # ---------- Filtering & scoring ----------
@@ -291,7 +306,7 @@ def append_new_rows(ws, notice_ids, fields_by_id):
             nid, f["title"], f["agency"], f["type"], f["setaside"], f["naics"],
             f["posted"], f["deadline"], "",  # Days Left formula patched below
             f["score"], f["eligibility"], f["link"], f["contact"],
-            f["status"], "", "", "",
+            f["status"], "", "", "", f.get("description", ""),
         ])
     if not rows:
         return
@@ -356,6 +371,9 @@ def send_digest(gmail_address, gmail_app_password, new_eligible, deadline_warnin
             lines.append(f"[{f['score']}] {f['title']}")
             lines.append(f"  Agency: {f['agency']}")
             lines.append(f"  Deadline: {f['deadline'] or 'n/a'}")
+            synopsis = f.get("description", "")
+            if synopsis:
+                lines.append(f"  Synopsis: {synopsis[:300]}{'...' if len(synopsis) > 300 else ''}")
             lines.append(f"  {f['link']}")
             lines.append("")
 
@@ -437,12 +455,22 @@ def main():
     print(f"{len(new_ids)} new, {len(amended_ids)} amended, "
           f"{len(filtered) - len(new_ids) - len(amended_ids)} unchanged.")
 
-    # Budgeted description fetch for the highest-scoring new items only
+    # Budgeted description fetch, highest-scoring new items first. Stops
+    # early if SAM.gov rate-limits us mid-run instead of burning the rest
+    # of the budget on failed calls.
     top_new = sorted(new_ids, key=lambda i: fields_by_id[i]["score"], reverse=True)
+    fetched = 0
     for nid in top_new[:config.MAX_DESCRIPTION_FETCHES]:
         url = fields_by_id[nid]["description_url"]
-        if url:
-            fields_by_id[nid]["description"] = fetch_description(url, api_key)
+        if not url:
+            continue
+        text, hit_limit = fetch_description(url, api_key)
+        fields_by_id[nid]["description"] = text
+        fetched += 1
+        if hit_limit:
+            print(f"WARNING: hit SAM.gov rate limit after {fetched} description fetches, "
+                  f"stopping early. Remaining new rows will have a blank Synopsis.", file=sys.stderr)
+            break
 
     if not new_ids and not amended_ids:
         print("Nothing new to write to the sheet. Done.")
