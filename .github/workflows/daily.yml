@@ -1,0 +1,39 @@
+name: Daily SAM.gov Pull
+
+on:
+  schedule:
+    - cron: "30 11 * * 1-5"   # ~7:30 AM ET on weekdays (11:30 UTC; shift by 1hr for DST if it matters to you)
+  workflow_dispatch:            # adds a manual "Run workflow" button for testing
+
+permissions:
+  contents: write               # needed so the job can commit the updated database file
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tracker
+        run: python tracker.py
+        env:
+          SAM_API_KEY: ${{ secrets.SAM_API_KEY }}
+          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+
+      - name: Commit updated database
+        run: |
+          git config user.name "bd-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add opportunities.db
+          git diff --cached --quiet || git commit -m "Daily pull $(date +%F)"
+          git push
