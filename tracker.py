@@ -234,7 +234,10 @@ def score_and_tag(item):
     if any(kw.lower() in title_lower for kw in config.KEYWORDS_EXCLUDE):
         score = 0
 
-    status = "Review" if score >= config.REVIEW_SCORE_THRESHOLD else "Logged"
+    # Status tracks the actual BD pipeline stage (New/Reviewing/Pursuing/etc,
+    # set manually in the sheet). Score/Eligibility columns carry the
+    # score-based signal instead, so every new row simply starts as "New".
+    status = "New"
 
     contacts = item.get("pointOfContact") or []
     contact_str = ""
